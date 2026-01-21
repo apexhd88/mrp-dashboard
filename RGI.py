@@ -5,8 +5,24 @@ from datetime import datetime
 from collections import OrderedDict
 import random
 import io
+import os
+import sys
 
-st.set_page_config(page_title="MRP System Dashboard", layout="wide")
+# Fix for potential import issues on Streamlit Cloud
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+st.set_page_config(
+    page_title="MRP System Dashboard", 
+    layout="wide",
+    page_icon="🏭"
+)
 
 # --- Session State Initialization ---
 if 'rm_stock' not in st.session_state:
@@ -25,6 +41,24 @@ if 'fg_colors' not in st.session_state:
     st.session_state.fg_colors = {}
 if 'select_all_trigger' not in st.session_state:
     st.session_state.select_all_trigger = False
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+
+# Clear cache button in sidebar
+with st.sidebar:
+    st.title("⚙️ System Controls")
+    if st.button("🔄 Clear All Session Data"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+    
+    st.divider()
+    st.info("""
+    **Upload Instructions:**
+    1. Use Excel files with proper column names
+    2. Required columns will be auto-detected
+    3. Data persists until session ends
+    """)
 
 st.title("🏭 Localhost MRP Dashboard")
 
@@ -33,14 +67,15 @@ tab1, tab2, tab3 = st.tabs(["📦 Stock & PO Management", "🧪 FG Formulas & Se
 # Function to generate or get color for FG code
 def get_fg_color(fg_code):
     if fg_code not in st.session_state.fg_colors:
-        random.seed(hash(fg_code) % 1000)
+        # Use consistent hashing for colors
+        color_index = hash(fg_code) % 20
         colors_list = [
             '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
             '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
             '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
             '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5'
         ]
-        color = colors_list[len(st.session_state.fg_colors) % len(colors_list)]
+        color = colors_list[color_index]
         st.session_state.fg_colors[fg_code] = color
     return st.session_state.fg_colors[fg_code]
 
@@ -184,11 +219,17 @@ def generate_html_report(results, shortage_details, prod_date, total_volume, rea
         
         for _, row in po_status.iterrows():
             status_class = "status-shortage" if row['Status'] == 'Delayed' else ""
+            arrival_date = row['Arrival Date']
+            if hasattr(arrival_date, 'strftime'):
+                arrival_str = arrival_date.strftime('%d/%m/%Y')
+            else:
+                arrival_str = str(arrival_date)
+                
             html_content += f"""
                 <tr>
                     <td>{row['RM Code']}</td>
                     <td>{row['Quantity']:,.4f} Kg</td>
-                    <td>{row['Arrival Date'].strftime('%d/%m/%Y') if hasattr(row['Arrival Date'], 'strftime') else str(row['Arrival Date'])}</td>
+                    <td>{arrival_str}</td>
                     <td class="{status_class}">{row['Status']}</td>
                 </tr>
             """
@@ -225,186 +266,195 @@ def generate_html_report(results, shortage_details, prod_date, total_volume, rea
 
 # Function to generate PDF report
 def generate_report(results, shortage_details, prod_date, total_volume, ready_fgs, delayed_pos, po_status):
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
-        
-        buffer = io.BytesIO()
-        
-        doc = SimpleDocTemplate(buffer, pagesize=A4, 
-                              rightMargin=72, leftMargin=72,
-                              topMargin=72, bottomMargin=72)
-        
-        elements = []
-        styles = getSampleStyleSheet()
-        
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=18,
-            spaceAfter=30,
-            alignment=1
-        )
-        
-        heading_style = ParagraphStyle(
-            'CustomHeading',
-            parent=styles['Heading2'],
-            fontSize=14,
-            spaceAfter=12,
-            spaceBefore=12
-        )
-        
-        normal_style = styles['Normal']
-        
-        elements.append(Paragraph("MRP Production Planning Summary Report", title_style))
-        elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
-        elements.append(Paragraph(f"Production Date: {prod_date.strftime('%d/%m/%Y')}", normal_style))
-        elements.append(Spacer(1, 20))
-        
-        elements.append(Paragraph("Summary Metrics", heading_style))
-        
-        summary_data = [
-            ["Metric", "Value"],
-            ["Planned Production Date", prod_date.strftime('%d/%m/%Y')],
-            ["Producible FG Types", str(len(ready_fgs))],
-            ["Total Production Volume", f"{total_volume:,.1f} Kg"],
-            ["Delayed Purchase Orders", str(delayed_pos)]
-        ]
-        
-        summary_table = Table(summary_data, colWidths=[200, 150])
-        summary_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(summary_table)
-        elements.append(Spacer(1, 20))
-        
-        elements.append(Paragraph("Production Capability List", heading_style))
-        
-        if results:
-            table_data = [["FG Code", "Expected", "Max (Kg)", "Actual (Kg)", "Status", "Missing RM", "Batches"]]
+    if REPORTLAB_AVAILABLE:
+        try:
+            buffer = io.BytesIO()
             
-            for item in results:
-                table_data.append([
-                    item['FG'],
-                    item['Expected'],
-                    item['Max'],
-                    item['Actual'],
-                    item['Status'],
-                    item['Missing'],
-                    str(item['Batches'])
-                ])
+            doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                                  rightMargin=72, leftMargin=72,
+                                  topMargin=72, bottomMargin=72)
             
-            prod_table = Table(table_data, colWidths=[70, 60, 60, 60, 60, 70, 50])
-            prod_table.setStyle(TableStyle([
+            elements = []
+            styles = getSampleStyleSheet()
+            
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                spaceAfter=30,
+                alignment=1
+            )
+            
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                spaceAfter=12,
+                spaceBefore=12
+            )
+            
+            normal_style = styles['Normal']
+            
+            elements.append(Paragraph("MRP Production Planning Summary Report", title_style))
+            elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+            elements.append(Paragraph(f"Production Date: {prod_date.strftime('%d/%m/%Y')}", normal_style))
+            elements.append(Spacer(1, 20))
+            
+            elements.append(Paragraph("Summary Metrics", heading_style))
+            
+            summary_data = [
+                ["Metric", "Value"],
+                ["Planned Production Date", prod_date.strftime('%d/%m/%Y')],
+                ["Producible FG Types", str(len(ready_fgs))],
+                ["Total Production Volume", f"{total_volume:,.1f} Kg"],
+                ["Delayed Purchase Orders", str(delayed_pos)]
+            ]
+            
+            summary_table = Table(summary_data, colWidths=[200, 150])
+            summary_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
                 ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                ('FONTSIZE', (0, 1), (-1, -1), 9),
             ]))
-            elements.append(prod_table)
+            elements.append(summary_table)
             elements.append(Spacer(1, 20))
-        
-        shortage_exists = False
-        for fg in shortage_details:
-            if shortage_details[fg]:
-                shortage_exists = True
-                break
-        
-        if shortage_exists:
-            elements.append(Paragraph("Shortage Details", heading_style))
             
+            elements.append(Paragraph("Production Capability List", heading_style))
+            
+            if results:
+                table_data = [["FG Code", "Expected", "Max (Kg)", "Actual (Kg)", "Status", "Missing RM", "Batches"]]
+                
+                for item in results:
+                    table_data.append([
+                        item['FG'],
+                        item['Expected'],
+                        item['Max'],
+                        item['Actual'],
+                        item['Status'],
+                        item['Missing'],
+                        str(item['Batches'])
+                    ])
+                
+                prod_table = Table(table_data, colWidths=[70, 60, 60, 60, 60, 70, 50])
+                prod_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ]))
+                elements.append(prod_table)
+                elements.append(Spacer(1, 20))
+            
+            shortage_exists = False
             for fg in shortage_details:
                 if shortage_details[fg]:
-                    elements.append(Paragraph(f"FG Code: {fg}", styles['Heading3']))
-                    for item in shortage_details[fg]:
-                        elements.append(Paragraph(f"• {item}", normal_style))
-                    elements.append(Spacer(1, 10))
-            elements.append(Spacer(1, 20))
-        
-        if po_status is not None and not po_status.empty:
-            elements.append(Paragraph("Purchase Order Delay Status", heading_style))
+                    shortage_exists = True
+                    break
             
-            po_data = [["RM Code", "Quantity", "Arrival Date", "Status"]]
+            if shortage_exists:
+                elements.append(Paragraph("Shortage Details", heading_style))
+                
+                for fg in shortage_details:
+                    if shortage_details[fg]:
+                        elements.append(Paragraph(f"FG Code: {fg}", styles['Heading3']))
+                        for item in shortage_details[fg]:
+                            elements.append(Paragraph(f"• {item}", normal_style))
+                        elements.append(Spacer(1, 10))
+                elements.append(Spacer(1, 20))
             
-            for _, row in po_status.iterrows():
-                po_data.append([
-                    str(row['RM Code']),
-                    f"{row['Quantity']:,.4f} Kg",
-                    row['Arrival Date'].strftime('%d/%m/%Y') if hasattr(row['Arrival Date'], 'strftime') else str(row['Arrival Date']),
-                    row['Status']
-                ])
+            if po_status is not None and not po_status.empty:
+                elements.append(Paragraph("Purchase Order Delay Status", heading_style))
+                
+                po_data = [["RM Code", "Quantity", "Arrival Date", "Status"]]
+                
+                for _, row in po_status.iterrows():
+                    arrival_date = row['Arrival Date']
+                    if hasattr(arrival_date, 'strftime'):
+                        arrival_str = arrival_date.strftime('%d/%m/%Y')
+                    else:
+                        arrival_str = str(arrival_date)
+                        
+                    po_data.append([
+                        str(row['RM Code']),
+                        f"{row['Quantity']:,.4f} Kg",
+                        arrival_str,
+                        row['Status']
+                    ])
+                
+                po_table = Table(po_data, colWidths=[80, 80, 80, 80])
+                po_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ]))
+                elements.append(po_table)
+                elements.append(Spacer(1, 20))
             
-            po_table = Table(po_data, colWidths=[80, 80, 80, 80])
-            po_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ]))
-            elements.append(po_table)
-            elements.append(Spacer(1, 20))
+            elements.append(Paragraph("System Settings", heading_style))
+            settings_text = f"""
+            • Decimal Precision: {st.session_state.calculation_margin} places
+            • FIFO Order: {', '.join(st.session_state.fg_analysis_order.keys()) if st.session_state.fg_analysis_order else 'Not set'}
+            • Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            """
+            elements.append(Paragraph(settings_text, normal_style))
+            
+            elements.append(Spacer(1, 30))
+            elements.append(Paragraph("RGI - Supply Chain Department", ParagraphStyle(
+                'CompanyFooter',
+                parent=styles['Normal'],
+                fontSize=12,
+                alignment=1,
+                textColor=colors.HexColor('#3498db'),
+                spaceBefore=20
+            )))
+            
+            elements.append(Spacer(1, 10))
+            elements.append(Paragraph("Report generated by MRP Dashboard System", ParagraphStyle(
+                'Footer',
+                parent=styles['Normal'],
+                fontSize=10,
+                alignment=1,
+                textColor=colors.grey
+            )))
+            elements.append(Paragraph("--- End of Report ---", ParagraphStyle(
+                'Footer',
+                parent=styles['Normal'],
+                fontSize=10,
+                alignment=1,
+                textColor=colors.grey
+            )))
+            
+            doc.build(elements)
+            
+            pdf_data = buffer.getvalue()
+            buffer.close()
+            
+            return pdf_data, "pdf"
         
-        elements.append(Paragraph("System Settings", heading_style))
-        settings_text = f"""
-        • Decimal Precision: {st.session_state.calculation_margin} places
-        • FIFO Order: {', '.join(st.session_state.fg_analysis_order.keys()) if st.session_state.fg_analysis_order else 'Not set'}
-        • Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """
-        elements.append(Paragraph(settings_text, normal_style))
-        
-        elements.append(Spacer(1, 30))
-        elements.append(Paragraph("RGI - Supply Chain Department", ParagraphStyle(
-            'CompanyFooter',
-            parent=styles['Normal'],
-            fontSize=12,
-            alignment=1,
-            textColor=colors.HexColor('#3498db'),
-            spaceBefore=20
-        )))
-        
-        elements.append(Spacer(1, 10))
-        elements.append(Paragraph("Report generated by MRP Dashboard System", ParagraphStyle(
-            'Footer',
-            parent=styles['Normal'],
-            fontSize=10,
-            alignment=1,
-            textColor=colors.grey
-        )))
-        elements.append(Paragraph("--- End of Report ---", ParagraphStyle(
-            'Footer',
-            parent=styles['Normal'],
-            fontSize=10,
-            alignment=1,
-            textColor=colors.grey
-        )))
-        
-        doc.build(elements)
-        
-        pdf_data = buffer.getvalue()
-        buffer.close()
-        
-        return pdf_data, "pdf"
+        except Exception as e:
+            st.error(f"PDF generation error: {str(e)}")
+            # Fall back to HTML
+            html_content = generate_html_report(results, shortage_details, prod_date, total_volume, ready_fgs, delayed_pos, po_status)
+            return html_content.encode('utf-8'), "html"
     
-    except ImportError:
+    else:
+        # ReportLab not available, use HTML
         html_content = generate_html_report(results, shortage_details, prod_date, total_volume, ready_fgs, delayed_pos, po_status)
         return html_content.encode('utf-8'), "html"
 
@@ -414,7 +464,7 @@ def add_footer():
     st.markdown(
         """
         <div style="text-align: center; color: #666; font-size: 12px; padding: 10px;">
-            <strong>RGI - Supply Chain Department</strong> | MRP Dashboard System
+            <strong>RGI - Supply Chain Department</strong> | MRP Dashboard System v1.0
         </div>
         """,
         unsafe_allow_html=True
@@ -429,8 +479,9 @@ with tab1:
         
         if st.button("🔄 Clear RM Stock", key="clear_rm"):
             st.session_state.rm_stock = pd.DataFrame(columns=['RM Code', 'Quantity'])
+            st.success("RM Stock cleared!")
         
-        rm_file = st.file_uploader("Upload RM Stock Excel", type=['xlsx'], key="rm_up")
+        rm_file = st.file_uploader("Upload RM Stock Excel", type=['xlsx', 'xls'], key="rm_up")
         
         if rm_file is not None:
             try:
@@ -462,6 +513,8 @@ with tab1:
                     
                     if not processed_df.empty:
                         st.session_state.rm_stock = processed_df
+                        st.session_state.data_loaded = True
+                        st.success(f"Successfully loaded {len(processed_df)} RM stock records!")
                     else:
                         st.warning("No valid data found in the uploaded file")
                         
@@ -471,7 +524,7 @@ with tab1:
                         missing_cols.append("RM Code")
                     if 'Quantity' not in column_mapping:
                         missing_cols.append("Quantity")
-                    st.error(f"Missing columns: {', '.join(missing_cols)}")
+                    st.error(f"Missing columns: {', '.join(missing_cols)}. Found columns: {list(df.columns)}")
                     
             except Exception as e:
                 st.error(f"Error processing RM file: {str(e)}")
@@ -489,6 +542,16 @@ with tab1:
                 hide_index=True
             )
             
+            # Download stock data
+            csv = st.session_state.rm_stock.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download RM Stock Data",
+                data=csv,
+                file_name=f"rm_stock_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="download_rm_stock"
+            )
+            
             st.write("### 🔍 View RM Details")
             if not st.session_state.rm_stock.empty:
                 sel_rm = st.selectbox(
@@ -502,15 +565,16 @@ with tab1:
                         qty = qty_row['Quantity'].values[0]
                         st.metric(label=f"Available {sel_rm}", value=f"{qty:,.4f} Kg")
         else:
-            st.info("No RM stock data loaded yet. Please upload an Excel file.")
+            st.info("📤 No RM stock data loaded yet. Please upload an Excel file with RM Code and Quantity columns.")
 
     with col2:
         st.subheader("RM in Purchase Orders (PO)")
         
         if st.button("🔄 Clear RM PO", key="clear_po"):
             st.session_state.rm_po = pd.DataFrame(columns=['RM Code', 'Quantity', 'Arrival Date'])
+            st.success("RM PO cleared!")
         
-        po_file = st.file_uploader("Upload RM PO Excel", type=['xlsx'], key="po_up")
+        po_file = st.file_uploader("Upload RM PO Excel", type=['xlsx', 'xls'], key="po_up")
         
         if po_file is not None:
             try:
@@ -558,6 +622,7 @@ with tab1:
                     
                     if not processed_df.empty:
                         st.session_state.rm_po = processed_df
+                        st.success(f"Successfully loaded {len(processed_df)} PO records!")
                     else:
                         st.warning("No valid data found in the uploaded file")
                         
@@ -566,7 +631,7 @@ with tab1:
                     for col in ['RM Code', 'Quantity', 'Arrival Date']:
                         if col not in column_mapping:
                             missing_cols.append(col)
-                    st.error(f"Missing columns: {', '.join(missing_cols)}")
+                    st.error(f"Missing columns: {', '.join(missing_cols)}. Found columns: {list(df_po.columns)}")
                     
             except Exception as e:
                 st.error(f"Error processing PO file: {str(e)}")
@@ -586,6 +651,16 @@ with tab1:
                 hide_index=True
             )
             
+            # Download PO data
+            csv_po = st.session_state.rm_po.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download PO Data",
+                data=csv_po,
+                file_name=f"rm_po_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="download_rm_po"
+            )
+            
             st.write("### 📊 Total RM in PO by Code")
             if not st.session_state.rm_po.empty:
                 total_po = st.session_state.rm_po.groupby('RM Code')['Quantity'].sum().reset_index()
@@ -597,7 +672,7 @@ with tab1:
                     hide_index=True
                 )
         else:
-            st.info("No PO data loaded yet. Please upload an Excel file.")
+            st.info("📤 No PO data loaded yet. Please upload an Excel file with RM Code, Quantity, and Arrival Date columns.")
     
     add_footer()
 
@@ -610,12 +685,13 @@ with tab2:
         
         fg_files = st.file_uploader(
             "Upload FG Formulas (Multiple allowed)", 
-            type=['xlsx'], 
+            type=['xlsx', 'xls'], 
             accept_multiple_files=True,
             key="fg_uploader"
         )
         
         if fg_files:
+            total_loaded = 0
             for f in fg_files:
                 try:
                     new_fg = pd.read_excel(f)
@@ -668,6 +744,9 @@ with tab2:
                             for fg_code in processed_fg['FG Code'].unique():
                                 if fg_code not in st.session_state.fg_colors:
                                     get_fg_color(fg_code)
+                            
+                            total_loaded += len(processed_fg['FG Code'].unique())
+                            st.success(f"Loaded {len(processed_fg['FG Code'].unique())} FG formulas from {f.name}")
                         else:
                             st.warning(f"No valid data found in {f.name}")
                             
@@ -676,10 +755,13 @@ with tab2:
                         for col in ['FG Code', 'RM Code', 'Quantity']:
                             if col not in column_mapping:
                                 missing_cols.append(col)
-                        st.error(f"{f.name}: Missing columns {', '.join(missing_cols)}")
+                        st.error(f"{f.name}: Missing columns {', '.join(missing_cols)}. Found: {list(new_fg.columns)}")
                         
                 except Exception as e:
                     st.error(f"Error reading {f.name}: {str(e)}")
+            
+            if total_loaded > 0:
+                st.session_state.data_loaded = True
         
         if not st.session_state.fg_formulas.empty:
             st.divider()
@@ -693,6 +775,16 @@ with tab2:
                 use_container_width=True,
                 height=min(400, len(display_fg) * 35 + 40),
                 hide_index=True
+            )
+            
+            # Download FG formulas
+            csv_fg = st.session_state.fg_formulas.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download FG Formulas",
+                data=csv_fg,
+                file_name=f"fg_formulas_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="download_fg_formulas"
             )
             
             st.divider()
@@ -742,6 +834,20 @@ with tab2:
                 for i, (fg, _) in enumerate(st.session_state.fg_analysis_order.items(), 1):
                     st.write(f"{i}. {fg}")
                 
+                # Allow reordering
+                if len(st.session_state.fg_analysis_order) > 1:
+                    st.write("**🔄 Reorder Priority:**")
+                    order_list = list(st.session_state.fg_analysis_order.keys())
+                    for i, fg in enumerate(order_list):
+                        col_move1, col_move2 = st.columns([4, 1])
+                        with col_move1:
+                            st.write(f"{i+1}. {fg}")
+                        with col_move2:
+                            if i > 0 and st.button("⬆️", key=f"up_{fg}"):
+                                order_list[i], order_list[i-1] = order_list[i-1], order_list[i]
+                                st.session_state.fg_analysis_order = OrderedDict((fg, idx) for idx, fg in enumerate(order_list))
+                                st.rerun()
+                
                 st.write("### 📊 View Formula Details")
                 sel_fg_view = st.selectbox(
                     "Select FG to view details:",
@@ -763,7 +869,7 @@ with tab2:
                     )
         
         else:
-            st.info("No FG formulas loaded yet. Please upload Excel files.")
+            st.info("🧪 No FG formulas loaded yet. Please upload Excel files with FG Code, RM Code, and Quantity columns.")
     
     with col2:
         st.subheader("⚙️ Calculation Settings")
@@ -774,7 +880,8 @@ with tab2:
             min_value=0,
             max_value=6,
             value=st.session_state.calculation_margin,
-            help="Controls rounding precision for all calculations"
+            help="Controls rounding precision for all calculations",
+            key="decimal_precision"
         )
         
         if margin != st.session_state.calculation_margin:
@@ -784,11 +891,12 @@ with tab2:
         
         st.write("### 🗑️ Data Management")
         
-        if st.button("🗑️ Clear All FG Formulas", type="secondary"):
+        if st.button("🗑️ Clear All FG Formulas", type="secondary", key="clear_all_fg"):
             st.session_state.fg_formulas = pd.DataFrame(columns=['FG Code', 'RM Code', 'Quantity'])
             st.session_state.fg_analysis_order = OrderedDict()
             st.session_state.fg_expected_capacity = {}
             st.session_state.fg_colors = {}
+            st.success("All FG formulas cleared!")
         
         st.divider()
         
@@ -797,7 +905,7 @@ with tab2:
             fg_codes = st.session_state.fg_formulas['FG Code'].unique().tolist()
             to_delete = st.multiselect("Select FG to delete:", fg_codes, key="fg_delete_select")
             
-            if st.button("🗑️ Delete Selected FG", type="primary") and to_delete:
+            if st.button("🗑️ Delete Selected FG", type="primary", key="delete_fg") and to_delete:
                 st.session_state.fg_formulas = st.session_state.fg_formulas[
                     ~st.session_state.fg_formulas['FG Code'].isin(to_delete)
                 ]
@@ -813,6 +921,9 @@ with tab2:
                 for fg in to_delete:
                     if fg in st.session_state.fg_colors:
                         del st.session_state.fg_colors[fg]
+                
+                st.success(f"Deleted {len(to_delete)} FG(s): {', '.join(to_delete)}")
+                st.rerun()
     
     add_footer()
 
@@ -829,33 +940,48 @@ with tab3:
         st.write("")
         export_button = st.button("📥 Generate & Download Report", type="primary", key="download_report_top")
     
+    # Check if data is ready
     data_ready = True
     warning_messages = []
     
     if st.session_state.rm_stock.empty:
-        warning_messages.append("RM Stock")
+        warning_messages.append("📦 RM Stock")
         data_ready = False
     
     if st.session_state.fg_formulas.empty:
-        warning_messages.append("FG Formulas")
+        warning_messages.append("🧪 FG Formulas")
         data_ready = False
     
     if not st.session_state.fg_analysis_order:
-        warning_messages.append("FG selection for analysis")
+        warning_messages.append("🎯 FG selection for analysis")
         data_ready = False
     
     if not data_ready:
-        st.warning(f"Please complete the following in previous tabs: {', '.join(warning_messages)}")
+        st.warning(f"⚠️ Please complete the following in previous tabs:")
+        for msg in warning_messages:
+            st.write(f"- {msg}")
+        
+        # Quick navigation buttons
+        st.write("**Quick Navigation:**")
+        col_nav1, col_nav2, col_nav3 = st.columns(3)
+        with col_nav1:
+            if st.button("Go to RM Stock", key="nav_rm"):
+                st.switch_page("RGI.py")  # This will refresh to Tab1
+        with col_nav2:
+            if st.button("Go to FG Formulas", key="nav_fg"):
+                st.switch_page("RGI.py")  # This will refresh to Tab2
     else:
         decimal_places = st.session_state.calculation_margin
         
+        # Prepare stock data
         stock_dict = st.session_state.rm_stock.set_index('RM Code')['Quantity'].to_dict()
-        stock_dict = {k: round(float(v), decimal_places) for k, v in stock_dict.items()}
+        stock_dict = {str(k).strip(): round(float(v), decimal_places) for k, v in stock_dict.items()}
         allocated_stock = stock_dict.copy()
         
         results = []
         shortage_details = {}
         
+        # Calculate production capabilities
         for fg in st.session_state.fg_analysis_order.keys():
             formula = st.session_state.fg_formulas[st.session_state.fg_formulas['FG Code'] == fg]
             
@@ -934,6 +1060,7 @@ with tab3:
                 "Batches": actual_batches
             })
         
+        # Prepare PO status
         if not st.session_state.rm_po.empty:
             po_status_for_report = st.session_state.rm_po.copy()
             po_status_for_report['Status'] = po_status_for_report['Arrival Date'].apply(
@@ -948,6 +1075,7 @@ with tab3:
         total_volume = sum(float(r['Actual'].replace(' Kg', '').replace(',', '')) 
                           for r in results if r['Actual'] != "0.0 Kg")
         
+        # Generate report if requested
         if export_button:
             try:
                 report_data, report_type = generate_report(
@@ -964,12 +1092,12 @@ with tab3:
                     mime_type = "application/pdf"
                     file_extension = "pdf"
                     file_name = f"MRP_Production_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    success_msg = "PDF report generated successfully!"
+                    success_msg = "✅ PDF report generated successfully!"
                 else:
                     mime_type = "text/html"
                     file_extension = "html"
                     file_name = f"MRP_Production_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                    success_msg = "HTML report generated successfully! (PDF library not available)"
+                    success_msg = "✅ HTML report generated successfully!"
                 
                 st.download_button(
                     label=f"⬇️ Click to Download {file_extension.upper()} Report",
@@ -988,7 +1116,10 @@ with tab3:
             except Exception as e:
                 st.error(f"Error generating report: {str(e)}")
         
+        # Expected capacities input
         st.write("### 🎯 Set Expected Capacities")
+        st.caption("Set 0 for automatic calculation based on available RM")
+        
         capacity_col1, capacity_col2 = st.columns(2)
         
         fg_list = list(st.session_state.fg_analysis_order.keys())
@@ -1052,6 +1183,16 @@ with tab3:
             }
         )
         
+        # Download results
+        csv_results = res_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Production Results",
+            data=csv_results,
+            file_name=f"production_results_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="download_results"
+        )
+        
         st.divider()
         st.write("### 🔍 Shortage Details")
         
@@ -1064,7 +1205,7 @@ with tab3:
                         st.write(f"• {item}")
         
         if not shortage_exists:
-            st.info("No shortages detected for selected FGs")
+            st.info("✅ No shortages detected for selected FGs")
         
         if not st.session_state.rm_po.empty:
             st.divider()
@@ -1173,9 +1314,14 @@ with tab3:
                     st.plotly_chart(fig2, use_container_width=True)
         
         st.info(
-            f"**Current Settings:**\n"
+            f"**⚙️ Current Settings:**\n"
             f"• Decimal Precision: {st.session_state.calculation_margin} places\n"
-            f"• FIFO Order: {', '.join(st.session_state.fg_analysis_order.keys())}"
+            f"• FIFO Order: {', '.join(st.session_state.fg_analysis_order.keys())}\n"
+            f"• Batch Size: 25 Kg per batch"
         )
     
     add_footer()
+
+# Add a success message when all data is loaded
+if st.session_state.data_loaded:
+    st.sidebar.success("✅ All data loaded successfully!")
